@@ -95,6 +95,8 @@ python portal.py tempo aa:bb:cc:dd:ee:ff 60
 
 O terminal pode ser aberto com `python portal.py` para subir o serviço e apresentar o menu administrativo. `python portal.py ajuda` lista os comandos disponíveis.
 
+O menu interativo tem identidade visual própria, cores no Termux, resumo de status e atalhos por categoria. Para abrir o portal com o console administrativo, use `wifi-portal`; para iniciar somente o servidor, use `wifi-portal servidor`. Também é possível executar diretamente comandos, por exemplo `wifi-portal clientes` ou `wifi-portal verificar`.
+
 ## Mercado Pago opcional
 
 O Mercado Pago começa **desligado** em instalações novas e também é desligado na migração desta versão, preservando o token e o histórico. Para habilitá-lo no painel, abra **Pagamentos**, informe o token de acesso e marque **Ativar**. O token não é exibido novamente; deixe o campo vazio para manter o valor salvo.
@@ -115,6 +117,8 @@ Desativar o método impede novas compras, mas não apaga registros de pagamentos
 Por padrão, o portal compara o conteúdo de `main/portal.py` no GitHub a cada **15 minutos**. Quando detectar código diferente, valida a sintaxe e a identidade do programa, guarda uma cópia de segurança, instala o arquivo e reinicia o serviço; as sessões e o banco ficam preservados. A verificação inclui mudanças no código mesmo quando o número da versão não foi alterado. Se o download ou a validação falhar, o portal registra o erro no painel e tenta novamente depois.
 
 Desative ou reative a instalação automática em **Admin → Sistema**. Pelo terminal, use `python portal.py config upd_auto 0` para desligar ou `python portal.py config upd_auto 1` para ligar. Mantenha a URL de atualização apontando para uma origem confiável: a instalação automática executa o script recebido após a validação básica.
+
+O endereço padrão e o endereço antigo conhecido do Dropbox são migrados para `https://raw.githubusercontent.com/khallendevs/portal-wifi-pago/main/portal.py`; confira em **Admin → Sistema** que esse é o link exibido.
 
 ## Variáveis de ambiente
 

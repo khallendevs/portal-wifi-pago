@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portal cativo de Wi-Fi pago para Termux (Android com ROOT) - v2.3 com atualizações automáticas.
+Portal cativo de Wi-Fi pago para Termux (Android com ROOT) - v2.4 com terminal aprimorado.
 
 Cliente conecta -> recebe um acesso inicial único de 5 minutos -> contata o administrador pelo WhatsApp para mais tempo.
 Mercado Pago pode ser habilitado opcionalmente pelo painel ou terminal.
@@ -16,7 +16,7 @@ Variáveis opcionais: WIFI_IFACE=wlan0  PORTAL_PORT=8080  MP_TOKEN=...  NOME_RED
 AO PUBLICAR UMA NOVA VERSÃO: aumente o número em VERSION para facilitar a identificação.
 O atualizador compara também o conteúdo do script, então não depende só do número.
 """
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 ID_PROGRAMA = "wifi-portal-termux"
 URL_ATUALIZACAO_PADRAO = "https://raw.githubusercontent.com/khallendevs/portal-wifi-pago/main/portal.py"
 
@@ -74,8 +74,8 @@ def iniciar_db():
             conn.execute("INSERT OR IGNORE INTO config VALUES(?,?)", (k, v))
         url_antiga = ("https://www.dropbox.com/scl/fi/vdycf70tjtowv3u4ud0aa/portal.py"
                       "?rlkey=pkotvd5w92ilgzxjccdl61fyv&st=wsp6an0s&dl=1")
-        conn.execute("UPDATE config SET v=? WHERE k='url_atualizacao' AND v=?",
-                     (URL_ATUALIZACAO_PADRAO, url_antiga))
+        conn.execute("UPDATE config SET v=? WHERE k='url_atualizacao' AND v IN (?,?)",
+                     (URL_ATUALIZACAO_PADRAO, url_antiga, "https://www.dropbox.com/scl/fi/vdycf70tjtowv3u4ud0aa/portal.py?rlkey=pkotvd5w92ilgzxjccdl61fyv&st=wsp6an0s&dl=1"))
         # Migração única: interrompe checkout legado e exige ativação explícita do Mercado Pago.
         # Token, histórico e cadastros são preservados; pagamentos novos ficam pausados.
         if not conn.execute("SELECT 1 FROM config WHERE k='politica_acesso_v1'").fetchone():
@@ -1522,31 +1522,70 @@ MENU = [("Status geral", "status", []), ("Clientes conectados", "clientes", []),
 
 def menu_terminal():
     global REINICIAR_PENDENTE
-    print("\n=== ADMIN (digite o número, um comando, 'ajuda' ou 'sair') ===")
+    cor = sys.stdout.isatty() and os.environ.get("TERM", "") not in ("", "dumb")
+    def paint(texto, codigo):
+        return f"\033[{codigo}m{texto}\033[0m" if cor else texto
+    def cabecalho():
+        os.system("clear" if cor else "")
+        ciano, azul, verde, cinza = "96", "94", "92", "90"
+        logo = [
+            "       .------.",
+            "      /  .--.  \\",
+            "     |  /    \\  |    PORTAL WI-FI",
+            "     |  \\    /  |    ADMIN CONSOLE",
+            "      \\  '--'  /",
+            "       '------'",
+        ]
+        print(paint("\\n".join(logo), ciano))
+        print(paint(f"  v{VERSION}  •  {cfg('nome_rede')}  •  interface {IFACE}", azul))
+        print(paint("  ─────────────────────────────────────────────────────", cinza))
+        linhas = c_status([]).splitlines()
+        for linha in linhas[:5]:
+            print("  " + linha)
+        print(paint("  ─────────────────────────────────────────────────────", cinza))
+    def grupo(titulo, opcoes):
+        print(paint("  " + titulo, "96"))
+        for idx, rotulo in opcoes:
+            print(f"    {paint(f'{idx:>2}', '93')}  {rotulo}")
+
+    mapa = {cmd: (i, perguntas) for i, (_, cmd, perguntas) in enumerate(MENU, 1)}
     while True:
-        print()
-        for i, (rot, _, _) in enumerate(MENU, 1):
-            print(f" {i:2}) {rot}")
+        cabecalho()
+        grupo("REDE E CLIENTES", [(1,"Status geral"),(2,"Clientes conectados"),(3,"Liberar/remover tempo"),(4,"Encerrar sessão"),(5,"Bloquear dispositivo"),(6,"Desbloquear dispositivo")])
+        grupo("GESTÃO", [(7,"Ver planos"),(8,"Métodos de pagamento"),(9,"Pagamentos pendentes"),(10,"Histórico de pagamentos"),(11,"Gerar vouchers")])
+        grupo("CONFIGURAÇÃO", [(12,"WhatsApp do administrador"),(13,"Senha do administrador"),(14,"Sistema e atualizações"),(15,"Verificar atualizações"),(16,"Instalar atualização agora"),(17,"Reverter atualização")])
+        print(paint("  ─────────────────────────────────────────────────────", "90"))
+        print("    Digite o número, um comando (ajuda), ou 0 para sair.")
         try:
-            op = input("\n> ").strip()
+            op = input(paint("\n  portal › ", "92")).strip()
         except (EOFError, KeyboardInterrupt):
-            print(); return
+            print("\n"); return
         if op in ("sair", "exit", "0"):
             return
-        if op.isdigit() and 1 <= int(op) <= len(MENU):
-            _, cmd, perguntas = MENU[int(op) - 1]
+        atalhos = {1:"status",2:"clientes",3:"tempo",4:"encerrar",5:"bloquear",6:"desbloquear",7:"planos",8:"metodos",9:"pendentes",10:"historico",11:"voucher",12:"whatsapp",13:"senha",14:"versao",15:"verificar",16:"atualizar",17:"reverter"}
+        if op.isdigit() and int(op) in atalhos:
+            cmd = atalhos[int(op)]
+            perguntas = mapa.get(cmd, (None, []))[1]
             try:
-                args = [input(f"  {p}: ").strip() for p in perguntas]
+                args = [input(paint(f"    {p}: ", "96")).strip() for p in perguntas]
             except (EOFError, KeyboardInterrupt):
                 continue
-            print(executar([cmd] + args))
+            resposta = executar([cmd] + args)
+            if cmd == "senha":
+                print(paint("\n  " + resposta, "92" if "sucesso" in resposta.lower() or "alterada" in resposta.lower() else "91"))
+                input(paint("\n  Enter para continuar…", "90"))
+            else:
+                print(paint("\n  ✓ ", "92") + resposta)
+                if cor:
+                    input(paint("\n  Enter para voltar ao menu…", "90"))
         elif op:
             try:
-                print(executar(shlex.split(op)))
+                resposta = executar(shlex.split(op))
+                print(paint("\n  ✓ ", "92") + resposta)
             except ValueError as ex:
-                print("Erro:", ex)
+                print(paint("  Erro: " + str(ex), "91"))
         if REINICIAR_PENDENTE and SERVIDOR_AQUI:
-            print("\nReiniciando o portal para aplicar a mudança…")
+            print(paint("\n  Reiniciando o portal para aplicar a mudança…", "93"))
             reiniciar()
 
 # ==================================================================== início
