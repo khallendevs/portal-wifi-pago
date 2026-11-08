@@ -1,0 +1,17 @@
+# Banco de dados do portal (gerado em tempo de execução, não deve ir para o repositório)
+*.db
+*.db-wal
+*.db-shm
+wifi_portal.db*
+
+# Backups de versões anteriores criados pelo próprio portal
+portal.py.bak-*
+portal.py.novo
+portal.py.desfeita
+
+# Python
+__pycache__/
+*.pyc
+
+# Sistema
+.DS_Store
