@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portal cativo de Wi-Fi pago para Termux (Android com ROOT) - v2.2 com acesso inicial limitado e controle opcional de pagamentos.
+Portal cativo de Wi-Fi pago para Termux (Android com ROOT) - v2.3 com atualizações automáticas.
 
 Cliente conecta -> recebe um acesso inicial único de 5 minutos -> contata o administrador pelo WhatsApp para mais tempo.
 Mercado Pago pode ser habilitado opcionalmente pelo painel ou terminal.
@@ -9,14 +9,14 @@ ADMIN (web):      http://IP_DO_HOTSPOT:8080/admin     (senha padrão: admin123)
 ADMIN (terminal): python portal.py            -> sobe o portal + menu de administração
                   python portal.py servidor   -> só o portal (use em 2º plano / nohup)
                   python portal.py ajuda      -> lista de comandos (funcionam com o portal rodando)
-ATUALIZAÇÃO:      painel web > Sistema   |   terminal: verificar / atualizar / reverter
+ATUALIZAÇÃO:      automática a cada 15 min (opcional) | painel web > Sistema
 
 Variáveis opcionais: WIFI_IFACE=wlan0  PORTAL_PORT=8080  MP_TOKEN=...  NOME_REDE=...  PRECO=2.00  MINUTOS=5
 
-AO PUBLICAR UMA NOVA VERSÃO: aumente o número em VERSION (ex.: 2.1.0 -> 2.2.0),
-senão o sistema de atualização entende que não há novidade.
+AO PUBLICAR UMA NOVA VERSÃO: aumente o número em VERSION para facilitar a identificação.
+O atualizador compara também o conteúdo do script, então não depende só do número.
 """
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 ID_PROGRAMA = "wifi-portal-termux"
 URL_ATUALIZACAO_PADRAO = "https://raw.githubusercontent.com/khallendevs/portal-wifi-pago/main/portal.py"
 
@@ -418,21 +418,69 @@ def atualizar(forcar=False):
     try:
         texto, nova = analisar(baixar(cfg("url_atualizacao")))
         cfg_set("upd_versao_remota", nova)
-        if vtuple(nova) <= vtuple(VERSION) and not forcar:
+        if vtuple(nova) < vtuple(VERSION) and not forcar:
+            return False, f"A versão remota ({nova}) é mais antiga que a instalada ({VERSION}); atualização recusada."
+        try:
+            with open(ARQUIVO, encoding="utf-8") as atual:
+                mesmo_conteudo = atual.read() == texto
+        except OSError:
+            mesmo_conteudo = False
+        if mesmo_conteudo and not forcar:
             return False, f"Você já está na versão mais recente ({VERSION})."
+        return _instalar_texto(texto, nova)
+    except Exception as ex:
+        return False, "Falha na atualização: " + str(ex)[:160]
+
+def _instalar_texto(texto, nova):
+    """Instala apenas conteúdo já validado, guardando até três backups recentes."""
+    tmp = ARQUIVO + ".novo"
+    try:
         shutil.copy2(ARQUIVO, f"{ARQUIVO}.bak-{VERSION}")
-        tmp = ARQUIVO + ".novo"
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(texto)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, os.stat(ARQUIVO).st_mode)
         os.replace(tmp, ARQUIVO)
         for velho in backups()[3:]:
             try:
                 os.remove(velho)
             except OSError:
                 pass
-        return True, f"Atualizado de {VERSION} para {nova}."
+        return True, f"Atualizado de {VERSION} para {nova}; backup salvo."
     except Exception as ex:
-        return False, "Falha na atualização: " + str(ex)[:160]
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False, "Falha ao instalar a atualização: " + str(ex)[:160]
+
+def atualizar_automaticamente():
+    """Baixa e instala o código do link confiável quando o conteúdo remoto mudar."""
+    agora = int(time.time())
+    try:
+        texto, nova = analisar(baixar(cfg("url_atualizacao")))
+        cfg_set("upd_versao_remota", nova)
+        if vtuple(nova) < vtuple(VERSION):
+            msg = f"Atualização automática recusada: versão remota {nova} é mais antiga que {VERSION}."
+            cfg_set("upd_erro", msg[:160]); cfg_set("upd_ultima", agora)
+            return False, msg
+        try:
+            with open(ARQUIVO, encoding="utf-8") as atual:
+                mesmo_conteudo = atual.read() == texto
+        except OSError:
+            mesmo_conteudo = False
+        if mesmo_conteudo:
+            cfg_set("upd_erro", ""); cfg_set("upd_ultima", agora)
+            return False, f"Portal atualizado ({VERSION}); nenhuma alteração nova."
+        ok, msg = _instalar_texto(texto, nova)
+        cfg_set("upd_ultima", agora)
+        cfg_set("upd_erro", "" if ok else msg[:160])
+        return ok, msg
+    except Exception as ex:
+        msg = "Falha na atualização automática: " + str(ex)[:140]
+        cfg_set("upd_erro", msg[:160]); cfg_set("upd_ultima", agora)
+        return False, msg
 
 def reverter():
     b = backups()
@@ -457,11 +505,13 @@ def loop_atualizacao():
     time.sleep(90)
     while True:
         if cfg("upd_auto") == "1":
-            try:
-                verificar_atualizacao()
-            except Exception:
-                pass
-        time.sleep(6 * 3600)
+            atualizado, mensagem = atualizar_automaticamente()
+            if atualizado:
+                print(mensagem, "Reiniciando para carregar a nova versão…")
+                reiniciar()
+            elif cfg("upd_erro"):
+                print(cfg("upd_erro"))
+        time.sleep(15 * 60)
 
 # ===================================================================== HTML
 ICONES = {
@@ -1027,11 +1077,11 @@ def pg_sistema(ses, local):
         acoes += F(ses, "/admin/sistema/reverter", "", "Voltar à versão anterior", "dan", "Voltar para a versao anterior? O portal reinicia.")
     url_campo = (f"<label>Link da atualização<input name=url value='{e(cfg('url_atualizacao'))}'></label>" if local else
                  f"<label>Link da atualização<input value='{e(cfg('url_atualizacao'))}' readonly><small>Por segurança, só pode ser alterado pelo próprio aparelho (ou pelo terminal: url-atualizacao).</small></label>")
-    upd = ("<div class=card><h2>Atualização do sistema</h2><p class=sub>O portal baixa a nova versão do seu link, confere se é o programa certo, guarda um backup e reinicia.</p>"
+    upd = ("<div class=card><h2>Atualização do sistema</h2><p class=sub>Com a opção automática ativa, o portal verifica o script do GitHub a cada 15 minutos. Se o código mudar, valida o arquivo, guarda um backup e reinicia para aplicar.</p>"
            f"<dl class=kv><dt>Versão instalada</dt><dd><span class=code>v{VERSION}</span></dd><dt>Última verificação</dt><dd>{hdr_fmt(ult) if ult else 'nunca'}</dd>"
            f"<dt>Situação</dt><dd>{estado}</dd>" + (f"<dt>Detalhe</dt><dd style='color:var(--ba)'>{e(erro)}</dd>" if erro else "") + "</dl>"
            f"<div class=row>{acoes}</div><hr style='border:0;border-top:1px solid var(--bd);margin:18px 0'>"
-           + F(ses, "/admin/sistema/upd_cfg", url_campo + f"<label class=cb>{ck('upd_auto', cfg('upd_auto') == '1')} Verificar automaticamente a cada 6 horas</label>", "Salvar", "", bloco=True) + "</div>")
+           + F(ses, "/admin/sistema/upd_cfg", url_campo + f"<label class=cb>{ck('upd_auto', cfg('upd_auto') == '1')} Instalar automaticamente quando o código mudar (verificação a cada 15 minutos; o portal reinicia)</label>", "Salvar", "", bloco=True) + "</div>")
     geral = ("<div class=card><h2>Geral</h2><p class=sub></p>"
              + F(ses, "/admin/sistema/salvar", f"<label>Nome da rede<input name=nome_rede value='{e(cfg('nome_rede'))}'></label>"
                  f"<label>WhatsApp do administrador<input name=whatsapp_admin value='{e(cfg('whatsapp_admin'))}' placeholder='+55 11 99999-9999' inputmode=tel></label><small>Informe o número em formato internacional; será usado no botão de contato dos clientes.</small>"

@@ -50,13 +50,26 @@ pkg install -y root-repo
 pkg install -y python iptables tsu
 ```
 
-Copie `portal.py` para o aparelho e inicie o serviço:
+### Instalação prática pelo GitHub
+
+No Termux, instale `curl` se ainda não estiver disponível e execute o instalador publicado no repositório:
 
 ```sh
-WIFI_IFACE=wlan0 python portal.py servidor
+pkg install -y curl
+curl -fsSL https://raw.githubusercontent.com/khallendevs/portal-wifi-pago/main/install.sh | bash
+```
+
+O instalador instala as dependências, valida o script baixado, preserva uma cópia do script anterior e cria o comando `wifi-portal`. O banco em `~/wifi_portal.db` não é substituído. Para conferir o conteúdo antes de executá-lo, abra [install.sh no GitHub](https://github.com/khallendevs/portal-wifi-pago/blob/main/install.sh).
+
+Inicie o serviço assim:
+
+```sh
+WIFI_IFACE=wlan0 wifi-portal servidor
 ```
 
 Substitua `wlan0` pela interface do hotspot, se necessário (confira com `ip a`). O painel administrativo estará em `http://IP_DO_HOTSPOT:8080/admin` (ou `http://127.0.0.1:8080/admin` no aparelho).
+
+Também é possível instalar manualmente baixando `portal.py` do repositório e executando `python portal.py servidor`.
 
 ## Configuração do WhatsApp
 
@@ -96,6 +109,12 @@ python portal.py metodos           # confere o estado atual
 ```
 
 Desativar o método impede novas compras, mas não apaga registros de pagamentos já existentes. Para que o status de um pagamento pendente continue sendo consultado, mantenha o token válido até resolver os pagamentos em aberto.
+
+## Atualizações automáticas
+
+Por padrão, o portal compara o conteúdo de `main/portal.py` no GitHub a cada **15 minutos**. Quando detectar código diferente, valida a sintaxe e a identidade do programa, guarda uma cópia de segurança, instala o arquivo e reinicia o serviço; as sessões e o banco ficam preservados. A verificação inclui mudanças no código mesmo quando o número da versão não foi alterado. Se o download ou a validação falhar, o portal registra o erro no painel e tenta novamente depois.
+
+Desative ou reative a instalação automática em **Admin → Sistema**. Pelo terminal, use `python portal.py config upd_auto 0` para desligar ou `python portal.py config upd_auto 1` para ligar. Mantenha a URL de atualização apontando para uma origem confiável: a instalação automática executa o script recebido após a validação básica.
 
 ## Variáveis de ambiente
 

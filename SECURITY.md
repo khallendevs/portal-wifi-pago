@@ -9,7 +9,8 @@
 - Mantenha o Android, Termux e os pacotes atualizados.
 - Guarde o token do Mercado Pago em variável de ambiente e nunca o publique.
 - Não compartilhe bancos de dados, backups ou logs que possam conter dados de clientes.
-- Use a atualização integrada somente com uma URL confiável e controlada por você.
+- A atualização automática executa código obtido da URL configurada depois de validar a sintaxe e a identidade do programa; use somente uma origem confiável e controle quem pode alterar essa URL.
+- O atualizador guarda backups recentes e reinicia o portal ao aplicar uma mudança. Isso não substitui a revisão do código nem a proteção do painel administrativo.
 
 ## Relatar uma vulnerabilidade
 
