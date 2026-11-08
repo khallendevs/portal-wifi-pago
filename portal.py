@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Portal cativo de Wi-Fi pago para Termux (Android com ROOT) - v2.1 com painel ADMIN e auto-atualização.
+Portal cativo de Wi-Fi pago para Termux (Android com ROOT) - v2.2 com acesso inicial limitado e controle opcional de pagamentos.
 
-Cliente conecta -> é redirecionado ao portal -> paga (Pix MP / Pix manual / voucher)
--> o MAC dele é liberado pelo tempo do plano comprado.
+Cliente conecta -> recebe um acesso inicial único de 5 minutos -> contata o administrador pelo WhatsApp para mais tempo.
+Mercado Pago pode ser habilitado opcionalmente pelo painel ou terminal.
 
 ADMIN (web):      http://IP_DO_HOTSPOT:8080/admin     (senha padrão: admin123)
 ADMIN (terminal): python portal.py            -> sobe o portal + menu de administração
@@ -11,15 +11,14 @@ ADMIN (terminal): python portal.py            -> sobe o portal + menu de adminis
                   python portal.py ajuda      -> lista de comandos (funcionam com o portal rodando)
 ATUALIZAÇÃO:      painel web > Sistema   |   terminal: verificar / atualizar / reverter
 
-Variáveis opcionais: WIFI_IFACE=wlan0  PORTAL_PORT=8080  MP_TOKEN=...  NOME_REDE=...  PRECO=2.00  MINUTOS=60
+Variáveis opcionais: WIFI_IFACE=wlan0  PORTAL_PORT=8080  MP_TOKEN=...  NOME_REDE=...  PRECO=2.00  MINUTOS=5
 
-AO PUBLICAR UMA NOVA VERSÃO NO DROPBOX: aumente o número em VERSION (ex.: 2.1.0 -> 2.2.0),
+AO PUBLICAR UMA NOVA VERSÃO: aumente o número em VERSION (ex.: 2.1.0 -> 2.2.0),
 senão o sistema de atualização entende que não há novidade.
 """
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 ID_PROGRAMA = "wifi-portal-termux"
-URL_ATUALIZACAO_PADRAO = ("https://www.dropbox.com/scl/fi/vdycf70tjtowv3u4ud0aa/portal.py"
-                          "?rlkey=pkotvd5w92ilgzxjccdl61fyv&st=wsp6an0s&dl=1")
+URL_ATUALIZACAO_PADRAO = "https://raw.githubusercontent.com/khallendevs/portal-wifi-pago/main/portal.py"
 
 import os, sys, re, ast, json, time, uuid, html, hmac, glob, shutil, hashlib, secrets, shlex, sqlite3
 import getpass, threading, subprocess, atexit, urllib.request
@@ -48,6 +47,7 @@ def iniciar_db():
         CREATE TABLE IF NOT EXISTS planos(id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT,
             minutos INTEGER, preco REAL, ativo INTEGER DEFAULT 1);
         CREATE TABLE IF NOT EXISTS sessoes(mac TEXT PRIMARY KEY, ip TEXT, expira INTEGER);
+        CREATE TABLE IF NOT EXISTS acessos_iniciais(mac TEXT PRIMARY KEY, concedido_em INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS pagamentos(id TEXT PRIMARY KEY, mac TEXT, status TEXT);
         CREATE TABLE IF NOT EXISTS vouchers(codigo TEXT PRIMARY KEY, minutos INTEGER,
             criado INTEGER, usado_por TEXT, usado_em INTEGER);
@@ -61,10 +61,10 @@ def iniciar_db():
         mp = os.environ.get("MP_TOKEN", "")
         padroes = {
             "nome_rede": os.environ.get("NOME_REDE", "Wi-Fi Livre"),
-            "metodo_mp": "1" if mp else "0", "mp_token": mp,
+            "metodo_mp": "0", "mp_token": mp,
             "metodo_pix_manual": "0", "pix_chave": "", "pix_nome": "",
-            "metodo_voucher": "1",
-            "metodo_teste": "0" if mp else "1",
+            "metodo_voucher": "0",
+            "metodo_teste": "0", "whatsapp_admin": "",
             "admin_somente_local": "0",
             "senha_hash": hash_senha(SENHA_PADRAO), "senha_padrao": "1",
             "url_atualizacao": URL_ATUALIZACAO_PADRAO, "upd_auto": "1",
@@ -72,9 +72,18 @@ def iniciar_db():
         }
         for k, v in padroes.items():
             conn.execute("INSERT OR IGNORE INTO config VALUES(?,?)", (k, v))
+        url_antiga = ("https://www.dropbox.com/scl/fi/vdycf70tjtowv3u4ud0aa/portal.py"
+                      "?rlkey=pkotvd5w92ilgzxjccdl61fyv&st=wsp6an0s&dl=1")
+        conn.execute("UPDATE config SET v=? WHERE k='url_atualizacao' AND v=?",
+                     (URL_ATUALIZACAO_PADRAO, url_antiga))
+        # Migração única: interrompe checkout legado e exige ativação explícita do Mercado Pago.
+        # Token, histórico e cadastros são preservados; pagamentos novos ficam pausados.
+        if not conn.execute("SELECT 1 FROM config WHERE k='politica_acesso_v1'").fetchone():
+            conn.execute("UPDATE config SET v='0' WHERE k IN ('metodo_mp','metodo_pix_manual','metodo_voucher','metodo_teste')")
+            conn.execute("INSERT OR REPLACE INTO config VALUES('politica_acesso_v1','1')")
         if not conn.execute("SELECT 1 FROM planos").fetchone():
             conn.execute("INSERT INTO planos(nome,minutos,preco) VALUES(?,?,?)",
-                         ("Plano padrão", int(os.environ.get("MINUTOS", "60")),
+                         ("Plano padrão", int(os.environ.get("MINUTOS", "5")),
                           float(os.environ.get("PRECO", "2.00"))))
         conn.commit()
 
@@ -219,6 +228,36 @@ def fmt_tempo(seg):
         return f"{d}d {h}h"
     return f"{h}h {m:02d}min" if h else f"{m}min"
 
+def normalizar_whatsapp(valor):
+    """Retorna número internacional só com dígitos ou None se inválido."""
+    digitos = re.sub(r"\D", "", str(valor or ""))
+    return digitos if 8 <= len(digitos) <= 15 and not digitos.startswith("0") else None
+
+def contato_whatsapp_html(texto="Olá! Preciso de mais tempo de acesso ao Wi-Fi."):
+    numero = normalizar_whatsapp(cfg("whatsapp_admin"))
+    if not numero:
+        return alerta("Para liberar mais tempo, entre em contato com o administrador da rede. O WhatsApp ainda não foi configurado.", "wa")
+    url = "https://wa.me/" + numero + "?text=" + quote(texto, safe="")
+    return ("<p class=ct><a class='btn pri' target=_blank rel='noopener noreferrer' href='" + url + "'>"
+            "Falar com o administrador no WhatsApp</a></p>")
+
+def conceder_acesso_inicial(mac, ip=""):
+    """Concede uma única sessão inicial de 5 min por endereço MAC, de forma persistente."""
+    mac = mac_ok(mac)
+    if not mac or bloqueado(mac):
+        return False, "Dispositivo inválido ou bloqueado."
+    agora = int(time.time())
+    with db_lock:
+        if conn.execute("SELECT 1 FROM acessos_iniciais WHERE mac=?", (mac,)).fetchone():
+            return False, "O acesso inicial de 5 minutos já foi utilizado neste dispositivo."
+        ativo = conn.execute("SELECT expira FROM sessoes WHERE mac=?", (mac,)).fetchone()
+        if ativo and ativo[0] > agora:
+            return False, "Este dispositivo já possui uma sessão ativa."
+        conn.execute("INSERT INTO acessos_iniciais(mac,concedido_em) VALUES(?,?)", (mac, agora))
+        conn.execute("REPLACE INTO sessoes(mac,ip,expira) VALUES(?,?,?)", (mac, ip or "", agora + 5 * 60))
+        conn.commit()
+    return True, "Acesso inicial de 5 minutos liberado."
+
 def fmt_dur(mins):
     mins = int(mins or 0)
     if mins < 60:
@@ -262,8 +301,6 @@ def metodos_ativos():
         m.append(("mp", "Pix automático", "Aprovação imediata"))
     if cfg("metodo_pix_manual") == "1" and cfg("pix_chave"):
         m.append(("pix", "Pix com confirmação", "Liberado após conferência"))
-    if cfg("metodo_teste") == "1":
-        m.append(("teste", "Modo teste", "Acesso grátis"))
     return m
 
 def registrar_pagamento(pid, mac, plano, metodo):
@@ -328,7 +365,7 @@ def vtuple(v):
         return (0,)
 
 def url_download(u):
-    """Valida a URL (https; http só em localhost) e força o download direto no Dropbox."""
+    """Valida a URL da atualização (https; http só em localhost)."""
     p = urlparse((u or "").strip())
     host = p.hostname or ""
     if not (p.scheme == "https" or (p.scheme == "http" and host in ("127.0.0.1", "localhost"))):
@@ -547,36 +584,45 @@ METODOS_NOME = {"mp": "Pix automático", "pix": "Pix manual", "teste": "Teste"}
 # --------------------------------------------------------------- página cliente
 def pagina_cliente(mac, msg=""):
     nome = e(cfg("nome_rede"))
-    topo = f"<div class=hero><div class=logo>{ico('wifi')}</div><h1>{nome}</h1><p>Acesso à internet por tempo</p></div>"
+    topo = f"<div class=hero><div class=logo>{ico('wifi')}</div><h1>{nome}</h1><p>Gerenciamento de acesso à rede</p></div>"
     aviso = alerta(e(msg), "in", "alerta") if msg else ""
     rodape = ("<p class=ct style='margin-top:26px'><small><a href=/admin>Área do administrador</a></small></p>"
               "<p class=ct><small style='color:var(--mu)'>Ideia e desenvolvimento: khallendev</small></p>")
     if bloqueado(mac):
-        return pagina(nome, f"<div class=cw>{topo}{alerta('Este dispositivo está bloqueado. Fale com o administrador.', 'ba')}{rodape}</div>")
+        return pagina(nome, f"<div class=cw>{topo}{alerta('Este dispositivo está bloqueado. Fale com o administrador.', 'ba')}{contato_whatsapp_html()}{rodape}</div>")
     ativo = ""
     exp = sessao_ativa(mac) if mac else 0
     if exp:
-        ativo = alerta(f"<b>Você já tem acesso.</b> Tempo restante: <b>{fmt_tempo(exp - time.time())}</b>.<br>"
-                       "<small>Quer mais tempo? Escolha um plano abaixo, ele é somado ao que você tem.</small>", "ok", "ok")
-    planos = q("SELECT id,nome,minutos,preco FROM planos WHERE ativo=1 ORDER BY minutos")
-    metodos = metodos_ativos()
+        ativo = alerta(f"<b>Acesso ativo.</b> Tempo restante: <b>{fmt_tempo(exp - time.time())}</b>.<br>"
+                       "<small>Para solicitar mais tempo, fale com o administrador da rede.</small>", "ok", "ok")
     corpo = topo + aviso + ativo
-    if planos and metodos:
-        corpo += "<form method=post action=/pagar><div class=sec>1 · Escolha o plano</div>"
-        for i, (pid, pn, pm, pp) in enumerate(planos):
-            corpo += (f"<label class=opt><input type=radio name=plano value={pid} {'checked' if i == 0 else ''}>"
-                      f"<span class=oc><span><b>{e(pn)}</b><small>{fmt_dur(pm)} de acesso</small></span><span class=pr>{reais(pp)}</span></span></label>")
-        corpo += "<div class=sec>2 · Forma de pagamento</div>"
-        for i, (mid, mn, md) in enumerate(metodos):
-            corpo += (f"<label class=opt><input type=radio name=metodo value={mid} {'checked' if i == 0 else ''}>"
-                      f"<span class=oc><span><b>{e(mn)}</b><small>{e(md)}</small></span></span></label>")
-        corpo += "<button class='btn pri w' style='margin-top:12px'>Continuar</button></form>"
-    elif not metodos and cfg("metodo_voucher") != "1":
-        corpo += alerta("Nenhuma forma de pagamento disponível no momento.", "wa")
-    if cfg("metodo_voucher") == "1":
-        abre = "open" if not (planos and metodos) else ""
-        corpo += (f"<details {abre}><summary>Tenho um voucher</summary><form method=post action=/voucher class=row style='margin-top:12px;flex-wrap:nowrap'>"
-                  "<input name=codigo placeholder='CÓDIGO' autocomplete=off autocapitalize=characters><button class=btn>Usar</button></form></details>")
+    mp_ligado = cfg("metodo_mp") == "1" and bool(cfg("mp_token"))
+    ja_usou_inicial = bool(mac and q("SELECT 1 FROM acessos_iniciais WHERE mac=?", mac))
+    if not exp and mac and not ja_usou_inicial:
+        corpo += ("<div class=card><h2>Acesso inicial gratuito</h2><p class=sub>Este dispositivo pode iniciar uma sessão única de 5 minutos.</p>"
+                  "<form method=post action=/inicio><button class='btn pri w'>Iniciar acesso de 5 minutos</button></form></div>")
+    elif not exp and ja_usou_inicial:
+        corpo += alerta("O acesso inicial de 5 minutos já foi utilizado neste dispositivo. Para liberar mais tempo, fale com o administrador.", "wa")
+    corpo += contato_whatsapp_html()
+    # A compra de planos só aparece quando o administrador habilita o Mercado Pago.
+    if mp_ligado:
+        planos = q("SELECT id,nome,minutos,preco FROM planos WHERE ativo=1 ORDER BY minutos")
+        metodos = metodos_ativos()
+        if planos and metodos:
+            corpo += "<form method=post action=/pagar><div class=sec>Planos disponíveis</div>"
+            for i, (pid, pn, pm, pp) in enumerate(planos):
+                corpo += (f"<label class=opt><input type=radio name=plano value={pid} {'checked' if i == 0 else ''}>"
+                          f"<span class=oc><span><b>{e(pn)}</b><small>{fmt_dur(pm)} de acesso</small></span><span class=pr>{reais(pp)}</span></span></label>")
+            corpo += "<div class=sec>Forma de pagamento</div>"
+            for i, (mid, mn, md) in enumerate(metodos):
+                corpo += (f"<label class=opt><input type=radio name=metodo value={mid} {'checked' if i == 0 else ''}>"
+                          f"<span class=oc><span><b>{e(mn)}</b><small>{e(md)}</small></span></span></label>")
+            corpo += "<button class='btn pri w' style='margin-top:12px'>Continuar</button></form>"
+        if cfg("metodo_voucher") == "1":
+            corpo += ("<details><summary>Tenho um voucher</summary><form method=post action=/voucher class=row style='margin-top:12px;flex-wrap:nowrap'>"
+                      "<input name=codigo placeholder='CÓDIGO' autocomplete=off autocapitalize=characters><button class=btn>Usar</button></form></details>")
+    elif not exp:
+        corpo += alerta("O pagamento online está desativado. Para obter mais tempo, solicite a liberação ao administrador.", "in")
     return pagina(nome, f"<div class=cw>{corpo}{rodape}</div>")
 
 def pagina_pagamento(pid, valor, extra):
@@ -676,17 +722,23 @@ class H(BaseHTTPRequestHandler):
                 ok = q("SELECT status FROM pagamentos WHERE id=?", pid)[0][0] == "paid"
             return self.resp(json.dumps({"ok": ok}), tipo="application/json")
 
-        if metodo == "POST" and rota == "/simular":
-            pid = form.get("id", "")
-            if cfg("metodo_teste") == "1" and q("SELECT 1 FROM pagamentos WHERE id=? AND metodo='teste'", pid):
-                aprovar_pagamento(pid)
-            return self.resp("{}", tipo="application/json")
+        if metodo == "POST" and rota == "/inicio":
+            if not mac:
+                return self.resp(pagina_cliente(mac, "Não foi possível identificar seu dispositivo. Reconecte ao Wi-Fi."), 400)
+            ok, mensagem = conceder_acesso_inicial(mac, ip)
+            if ok:
+                reconciliar()
+            return self.resp(pagina_cliente(mac, mensagem))
 
         if metodo == "POST" and rota == "/paguei":
             x("UPDATE pagamentos SET status='analise' WHERE id=? AND metodo='pix' AND status='pending'", form.get("id", ""))
             return self.resp("{}", tipo="application/json")
 
         if metodo == "POST" and rota in ("/pagar", "/voucher"):
+            if cfg("metodo_mp") != "1" or not cfg("mp_token"):
+                return self.resp(pagina_cliente(mac, "Pagamentos online desativados. Fale com o administrador para solicitar mais tempo."), 403)
+            if rota == "/voucher" and cfg("metodo_voucher") != "1":
+                return self.resp(pagina_cliente(mac, "O uso de vouchers está desativado."), 403)
             if not mac:
                 return self.resp(pagina_cliente(mac, "Não foi possível identificar seu dispositivo. Reconecte ao Wi-Fi."), 400)
             if bloqueado(mac):
@@ -907,16 +959,15 @@ def pg_pagamentos(ses, local):
     tok = cfg("mp_token")
     st = badge("Token configurado …" + tok[-4:], "ok") if tok else badge("Token não configurado", "wa")
     metodos = (
-        f"<div class=mth><h3>Pix automático · Mercado Pago</h3><p>O pagamento é confirmado sozinho e o acesso é liberado na hora. {st}</p>"
+        f"<div class=mth><h3>Mercado Pago · opcional</h3><p>Quando ativado, permite comprar os planos online. Desativado: clientes recebem apenas o acesso inicial de 5 minutos e devem solicitar tempo adicional pelo WhatsApp. {st}</p>"
         f"<div class=f><label class=cb>{ck('metodo_mp', cfg('metodo_mp') == '1')} Ativar</label>"
         "<label>Access token<input type=password name=mp_token placeholder='Cole o novo token (vazio mantém o atual)' autocomplete=off></label></div></div>"
-        f"<div class=mth><h3>Pix manual</h3><p>O cliente paga na sua chave e você aprova abaixo, em “Aguardando confirmação”.</p>"
+        f"<div class=mth><h3>Pix manual</h3><p>Disponível apenas quando o Mercado Pago estiver habilitado. O cliente paga na sua chave e você confirma no painel.</p>"
         f"<div class=f><label class=cb>{ck('metodo_pix_manual', cfg('metodo_pix_manual') == '1')} Ativar</label><div class=cols>"
         f"<label>Chave Pix<input name=pix_chave value='{e(cfg('pix_chave'))}'></label><label>Nome do titular<input name=pix_nome value='{e(cfg('pix_nome'))}'></label></div></div></div>"
-        f"<div class=mth><h3>Vouchers</h3><p>Códigos pré-pagos que você gera e vende por fora.</p>"
+        f"<div class=mth><h3>Vouchers</h3><p>Códigos pré-pagos, disponíveis para clientes somente quando o checkout do Mercado Pago estiver habilitado.</p>"
         f"<label class=cb style='display:flex;gap:10px;align-items:center'>{ck('metodo_voucher', cfg('metodo_voucher') == '1')} Ativar</label></div>"
-        f"<div class=mth><h3>Modo teste</h3><p>Libera acesso grátis com um botão. Use apenas para testar a instalação.</p>"
-        f"<label class=cb style='display:flex;gap:10px;align-items:center'>{ck('metodo_teste', cfg('metodo_teste') == '1')} Ativar</label></div>")
+        )
     pend = []
     for pid, mac, nome, valor, st_ in q("SELECT id,mac,plano_nome,valor,status FROM pagamentos WHERE metodo='pix' AND status IN ('pending','analise') ORDER BY criado DESC LIMIT 50"):
         hid = f"<input type=hidden name=id value={pid}>"
@@ -983,6 +1034,7 @@ def pg_sistema(ses, local):
            + F(ses, "/admin/sistema/upd_cfg", url_campo + f"<label class=cb>{ck('upd_auto', cfg('upd_auto') == '1')} Verificar automaticamente a cada 6 horas</label>", "Salvar", "", bloco=True) + "</div>")
     geral = ("<div class=card><h2>Geral</h2><p class=sub></p>"
              + F(ses, "/admin/sistema/salvar", f"<label>Nome da rede<input name=nome_rede value='{e(cfg('nome_rede'))}'></label>"
+                 f"<label>WhatsApp do administrador<input name=whatsapp_admin value='{e(cfg('whatsapp_admin'))}' placeholder='+55 11 99999-9999' inputmode=tel></label><small>Informe o número em formato internacional; será usado no botão de contato dos clientes.</small>"
                  f"<label class=cb>{ck('admin_somente_local', cfg('admin_somente_local') == '1')} Painel admin só neste aparelho (mais seguro)</label>", "Salvar", "pri", bloco=True) + "</div>")
     av = alerta("Você ainda usa a senha padrão. Troque agora.", "wa") if cfg("senha_padrao") == "1" else ""
     senha = (f"<div class=card><h2>Senha do administrador</h2><p class=sub>Vale para o painel web e para o terminal.</p>{av}"
@@ -1056,13 +1108,22 @@ def a_plano_excluir(f):
     return "/admin/planos", "Plano excluído."
 
 def a_metodos(f):
-    for k in ("metodo_mp", "metodo_pix_manual", "metodo_voucher", "metodo_teste"):
+    token_novo = f.get("mp_token", "").strip()
+    if token_novo:
+        cfg_set("mp_token", token_novo)
+    mp_quer_ligar = f.get("metodo_mp") == "1"
+    if mp_quer_ligar and not cfg("mp_token"):
+        cfg_set("metodo_mp", "0")
+        for k in ("metodo_pix_manual", "metodo_voucher"):
+            cfg_set(k, "1" if f.get(k) == "1" else "0")
+        cfg_set("pix_chave", f.get("pix_chave", "").strip()[:100])
+        cfg_set("pix_nome", f.get("pix_nome", "").strip()[:60])
+        return "/admin/pagamentos", "Não foi possível ativar Mercado Pago: configure o token primeiro."
+    for k in ("metodo_mp", "metodo_pix_manual", "metodo_voucher"):
         cfg_set(k, "1" if f.get(k) == "1" else "0")
-    if f.get("mp_token", "").strip():
-        cfg_set("mp_token", f["mp_token"].strip())
     cfg_set("pix_chave", f.get("pix_chave", "").strip()[:100])
     cfg_set("pix_nome", f.get("pix_nome", "").strip()[:60])
-    return "/admin/pagamentos", "Métodos de pagamento salvos."
+    return "/admin/pagamentos", "Métodos salvos. Mercado Pago " + ("ativado." if mp_quer_ligar else "desativado; clientes recebem 5 minutos iniciais e podem contatar o administrador.")
 
 def a_aprovar(f):
     ok = aprovar_pagamento(f.get("id", ""))
@@ -1095,7 +1156,12 @@ def a_bloq_rm(f):
     return "/admin/bloqueios", "Desbloqueado."
 
 def a_config(f):
+    numero_raw = f.get("whatsapp_admin", "").strip()
+    numero = normalizar_whatsapp(numero_raw) if numero_raw else ""
+    if numero_raw and not numero:
+        return "/admin/sistema", "Número de WhatsApp inválido. Use formato internacional, com 8 a 15 dígitos."
     cfg_set("nome_rede", f.get("nome_rede", "").strip()[:40] or "Wi-Fi Livre")
+    cfg_set("whatsapp_admin", numero)
     cfg_set("admin_somente_local", "1" if f.get("admin_somente_local") == "1" else "0")
     return "/admin/sistema", "Configurações salvas."
 
@@ -1163,8 +1229,8 @@ def c_status(a):
         linhas.append(f"⬆ Nova versão {atualizacao_disponivel()} disponível! Use: atualizar")
     if cfg("senha_padrao") == "1":
         linhas.append("⚠ Senha admin ainda é a padrão! Use: senha")
-    if cfg("metodo_teste") == "1":
-        linhas.append("⚠ Modo TESTE ligado (acesso grátis). Desligue: metodo teste off")
+    linhas.append("Acesso inicial: 5 minutos, uma vez por dispositivo; mais tempo é liberado pelo painel admin.")
+    linhas.append("Mercado Pago: " + ("ativado" if cfg("metodo_mp") == "1" and cfg("mp_token") else "desativado"))
     return "\n".join(linhas)
 
 def c_clientes(a):
@@ -1245,7 +1311,7 @@ def _plano_ativo(a, v):
 def c_plano_on(a): return _plano_ativo(a, 1)
 def c_plano_off(a): return _plano_ativo(a, 0)
 
-CHAVES_METODO = {"mp": "metodo_mp", "pix": "metodo_pix_manual", "voucher": "metodo_voucher", "teste": "metodo_teste"}
+CHAVES_METODO = {"mp": "metodo_mp", "pix": "metodo_pix_manual", "voucher": "metodo_voucher"}
 
 def c_metodos(a):
     ln = [f"{n:8} {'LIGADO' if cfg(k) == '1' else 'desligado'}" for n, k in CHAVES_METODO.items()]
@@ -1254,16 +1320,27 @@ def c_metodos(a):
 
 def c_metodo(a):
     if len(a) < 2 or a[0] not in CHAVES_METODO or a[1] not in ("on", "off"):
-        return "Uso: metodo mp|pix|voucher|teste on|off"
+        return "Uso: metodo mp|pix|voucher on|off"
+    if a[0] == "mp" and a[1] == "on" and not cfg("mp_token"):
+        return "Configure o token primeiro com: mp-token"
     cfg_set(CHAVES_METODO[a[0]], "1" if a[1] == "on" else "0")
     return c_metodos([])
 
 def c_mp_token(a):
     t = a[0] if a else getpass.getpass("Token Mercado Pago (não aparece): ")
     if t.strip():
-        cfg_set("mp_token", t.strip()); cfg_set("metodo_mp", "1")
-        return "Token salvo e Pix automático ligado."
+        cfg_set("mp_token", t.strip())
+        return "Token salvo. O Mercado Pago permanece no estado atual; use 'metodo mp on|off' para controlar a ativação."
     return "Cancelado."
+
+def c_whatsapp(a):
+    if not a:
+        return "WhatsApp do administrador: " + (cfg("whatsapp_admin") or "não configurado") + "\nUso: whatsapp +5511999999999"
+    numero = normalizar_whatsapp(" ".join(a))
+    if not numero:
+        return "Número inválido. Use formato internacional com 8 a 15 dígitos, ex.: whatsapp +5511999999999"
+    cfg_set("whatsapp_admin", numero)
+    return "WhatsApp do administrador salvo."
 
 def c_pix_chave(a):
     if not a:
@@ -1363,7 +1440,7 @@ COMANDOS = {
     "plano-edit": (c_plano_edit, "ID MIN PRECO"), "plano-del": (c_plano_del, "ID"),
     "plano-on": (c_plano_on, "ID"), "plano-off": (c_plano_off, "ID"),
     "metodos": (c_metodos, "ver métodos de pagamento"), "metodo": (c_metodo, "mp|pix|voucher|teste on|off"),
-    "mp-token": (c_mp_token, "[TOKEN] — token do Mercado Pago"), "pix-chave": (c_pix_chave, "CHAVE [titular]"),
+    "mp-token": (c_mp_token, "[TOKEN] — salva o token sem ativar o Mercado Pago"), "whatsapp": (c_whatsapp, "[NÚMERO] — configura o WhatsApp do administrador"), "pix-chave": (c_pix_chave, "CHAVE [titular]"),
     "voucher": (c_voucher, "QTD MIN — gera vouchers"), "vouchers": (c_vouchers, "vouchers disponíveis"),
     "pendentes": (c_pendentes, "Pix manual aguardando"), "aprovar": (c_aprovar, "ID"), "rejeitar": (c_rejeitar, "ID"),
     "historico": (c_historico, "últimos pagamentos"), "config": (c_config, "nome_rede|admin_somente_local|upd_auto VALOR"),
@@ -1385,8 +1462,8 @@ MENU = [("Status geral", "status", []), ("Clientes conectados", "clientes", []),
         ("Desbloquear dispositivo", "desbloquear", ["MAC"]), ("Ver planos", "planos", []),
         ("Criar plano", "plano-add", ["Nome (sem espaços)", "Minutos", "Preço"]),
         ("Editar plano", "plano-edit", ["ID", "Minutos", "Preço"]), ("Excluir plano", "plano-del", ["ID"]),
-        ("Métodos de pagamento", "metodos", []), ("Ligar/desligar método", "metodo", ["Método (mp/pix/voucher/teste)", "on ou off"]),
-        ("Definir token Mercado Pago", "mp-token", []), ("Definir chave Pix manual", "pix-chave", ["Chave Pix", "Nome do titular"]),
+        ("Métodos de pagamento", "metodos", []), ("Ligar/desligar método", "metodo", ["Método (mp/pix/voucher)", "on ou off"]),
+        ("Definir token Mercado Pago", "mp-token", []), ("Definir WhatsApp do administrador", "whatsapp", ["Número internacional ou vazio para consultar"]), ("Definir chave Pix manual", "pix-chave", ["Chave Pix", "Nome do titular"]),
         ("Pix pendentes", "pendentes", []), ("Aprovar pagamento", "aprovar", ["ID"]),
         ("Gerar vouchers", "voucher", ["Quantidade", "Minutos"]), ("Alterar senha admin", "senha", []),
         ("Histórico de pagamentos", "historico", []),

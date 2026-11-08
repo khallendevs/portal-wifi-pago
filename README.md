@@ -2,9 +2,9 @@
 
 # Portal Wi-Fi Pago
 
-**Portal cativo para administrar acesso Wi-Fi pré-pago em Android com Termux.**
+**Portal cativo e painel de administração de acesso Wi-Fi para Android com Termux.**
 
-Controle planos, pagamentos Pix, vouchers e sessões conectadas a partir de um painel web ou do terminal.
+Conceda um acesso inicial de 5 minutos, acompanhe os dispositivos conectados e libere mais tempo manualmente. O Mercado Pago é opcional.
 
 ![Plataforma](https://img.shields.io/badge/plataforma-Android%20%7C%20Termux-3DDC84?logo=android&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.x-3776AB?logo=python&logoColor=white)
@@ -16,32 +16,33 @@ Controle planos, pagamentos Pix, vouchers e sessões conectadas a partir de um p
 
 ## Visão geral
 
-O Portal Wi-Fi Pago transforma um hotspot Android em um portal cativo: visitantes são direcionados a uma página de acesso, escolhem um plano e, após a confirmação do pagamento ou uso de um voucher, recebem conectividade pelo período correspondente.
+O Portal Wi-Fi Pago administra o acesso de dispositivos conectados a um hotspot Android. Cada endereço MAC pode iniciar **uma única sessão inicial de 5 minutos**. Depois, o cliente solicita tempo adicional ao administrador pelo WhatsApp; o administrador confirma e libera minutos pelo painel web ou terminal.
 
-O projeto foi pensado para execução no **Termux** e concentra o portal e a administração em um único script Python, sem dependências Python externas.
+Se o administrador optar por habilitar o Mercado Pago, os planos e métodos de pagamento configurados também ficam disponíveis aos clientes. Com o Mercado Pago desligado, o checkout público fica suspenso e a liberação adicional é feita pelo administrador.
 
-## Funcionalidades
+O portal e o painel estão concentrados em um script Python, sem dependências Python externas. O controle de rede usa `iptables`.
 
-- **Planos por duração e preço**, com configuração de valores padrão.
-- **Pix via Mercado Pago** (automático) ou confirmação manual pelo administrador.
-- **Vouchers pré-pagos**, incluindo geração em lote.
-- **Modo de teste** para validar a instalação sem cobrar.
-- **Painel web responsivo** com clientes, planos, pagamentos, vouchers, bloqueios e indicadores.
-- **Administração por linha de comando** enquanto o portal está em execução.
-- **Atualização integrada** com cópia de segurança e opção de reversão.
-- **Proteções do painel**, incluindo hash de senha, limitação de tentativas e proteção CSRF.
+## Recursos
 
-> O controle de rede usa regras de `iptables` e requer acesso root no Android. Leia as limitações e os avisos de segurança antes de colocar o serviço em uso real.
+- Acesso inicial gratuito de **5 minutos, uma vez por endereço MAC**.
+- Painel web para clientes conectados, sessões, bloqueios, dispositivos fixos e liberação manual de tempo.
+- Botão de contato com o administrador via WhatsApp, usando o número configurado no painel.
+- Mercado Pago opcional: o administrador pode ligar/desligar pelo painel ou terminal.
+- Confirmação de pagamentos manuais no painel quando esse método está habilitado.
+- Vouchers opcionais, se habilitados pelo administrador.
+- Administração por linha de comando e atualização com backup/reversão.
+
+> **Limitação:** a identificação do acesso inicial usa o endereço MAC observado na rede. Dispositivos que alteram ou aleatorizam o MAC podem ser reconhecidos como novos dispositivos e, portanto, voltar a receber a sessão inicial. Não trate isso como mecanismo antifraude.
 
 ## Requisitos
 
 - Android com acesso root.
 - [Termux](https://termux.dev/) instalado.
-- Python 3 e ferramentas de rede disponíveis no Termux.
+- Python 3, `iptables` e `tsu` instalados no Termux.
 
 ## Instalação
 
-No Termux, instale os pacotes necessários:
+No Termux:
 
 ```sh
 pkg update -y
@@ -49,61 +50,77 @@ pkg install -y root-repo
 pkg install -y python iptables tsu
 ```
 
-Obtenha o arquivo `portal.py` e inicie o serviço:
+Copie `portal.py` para o aparelho e inicie o serviço:
 
 ```sh
-WIFI_IFACE=wlan0 python portal.py
+WIFI_IFACE=wlan0 python portal.py servidor
 ```
 
-Substitua `wlan0` pela interface usada pelo hotspot, se necessário (verifique com `ip a`). Para iniciar apenas o servidor, use:
+Substitua `wlan0` pela interface do hotspot, se necessário (confira com `ip a`). O painel administrativo estará em `http://IP_DO_HOTSPOT:8080/admin` (ou `http://127.0.0.1:8080/admin` no aparelho).
+
+## Configuração do WhatsApp
+
+No painel, entre em **Sistema → Geral** e informe o número do administrador em formato internacional, por exemplo `+55 11 99999-9999`. O cliente verá um botão para abrir o WhatsApp com uma mensagem pré-preenchida.
+
+Também é possível configurar pelo terminal:
 
 ```sh
-python portal.py servidor
+python portal.py whatsapp +5511999999999
+python portal.py whatsapp   # consulta o número salvo
 ```
 
-O painel administrativo fica em `http://IP_DO_HOTSPOT:8080/admin` (ou `http://127.0.0.1:8080/admin` no próprio aparelho).
+Se o número não estiver configurado, o portal orienta o cliente a procurar o administrador, mas não exibe o botão do WhatsApp.
 
-## Primeiro acesso: segurança obrigatória
+## Liberação e gestão de tempo
 
-**Antes de disponibilizar o hotspot, acesse o painel e troque a senha administrativa padrão (`admin123`) por uma senha forte e exclusiva.** Não exponha o painel administrativo diretamente à internet. Proteja também o aparelho, o hotspot e as credenciais de pagamento.
+Após a sessão inicial, use **Admin → Clientes** para conferir as conexões. Para liberar mais tempo, informe o MAC do dispositivo e os minutos desejados; também é possível encerrar ou bloquear a sessão. O comando de terminal correspondente é:
 
-Para Pix automático, configure o token do Mercado Pago por variável de ambiente (`MP_TOKEN`); nunca grave tokens, senhas ou dados de clientes no código-fonte nem os envie ao Git. Este repositório não inclui configuração de produção ou credenciais.
+```sh
+python portal.py clientes
+python portal.py tempo aa:bb:cc:dd:ee:ff 60
+```
 
-## Configuração opcional
+O terminal pode ser aberto com `python portal.py` para subir o serviço e apresentar o menu administrativo. `python portal.py ajuda` lista os comandos disponíveis.
+
+## Mercado Pago opcional
+
+O Mercado Pago começa **desligado** em instalações novas e também é desligado na migração desta versão, preservando o token e o histórico. Para habilitá-lo no painel, abra **Pagamentos**, informe o token de acesso e marque **Ativar**. O token não é exibido novamente; deixe o campo vazio para manter o valor salvo.
+
+Pelo terminal, salve o token e ative/desative separadamente:
+
+```sh
+python portal.py mp-token          # solicita token sem mostrá-lo na tela
+python portal.py metodo mp on      # ativa o Mercado Pago
+python portal.py metodo mp off     # desativa novas compras online
+python portal.py metodos           # confere o estado atual
+```
+
+Desativar o método impede novas compras, mas não apaga registros de pagamentos já existentes. Para que o status de um pagamento pendente continue sendo consultado, mantenha o token válido até resolver os pagamentos em aberto.
+
+## Variáveis de ambiente
 
 | Variável | Padrão | Descrição |
 |---|---:|---|
 | `WIFI_IFACE` | `wlan0` | Interface de rede do hotspot. |
 | `PORTAL_PORT` | `8080` | Porta do portal e do painel. |
 | `NOME_REDE` | `Wi-Fi Livre` | Nome exibido na página do cliente. |
-| `PRECO` | `2.00` | Preço do plano padrão criado na primeira execução. |
-| `MINUTOS` | `60` | Duração do plano padrão, em minutos. |
-| `MP_TOKEN` | *(vazio)* | Token de acesso do Mercado Pago para Pix automático. |
+| `PRECO` | `2.00` | Preço do plano criado na primeira execução. |
+| `MINUTOS` | `5` | Duração do plano padrão criado na primeira execução. |
+| `MP_TOKEN` | *(vazio)* | Token Mercado Pago; sua presença não ativa o recurso automaticamente. |
 
-## Comandos
+## Segurança
 
-```sh
-python portal.py            # inicia o portal e o menu de administração
-python portal.py servidor   # inicia somente o servidor
-python portal.py ajuda      # mostra os comandos disponíveis
-```
+- Troque a senha administrativa padrão (`admin123`) antes de usar o portal.
+- Não exponha `/admin` diretamente à internet; prefira restringir o acesso ao aparelho administrador.
+- Guarde o token do Mercado Pago e os arquivos locais de banco/backup com permissões restritas.
+- Configure o WhatsApp correto e teste o link antes de divulgar o hotspot.
+- Use atualizações somente de uma origem confiável.
+- Não publique tokens, senhas, bancos de dados, logs com dados pessoais ou informações de clientes.
 
-Consulte a ajuda exibida pelo próprio programa para os comandos de administração e atualização.
+Consulte [`SECURITY.md`](SECURITY.md) para mais orientações.
 
-## Atualizações
+## Responsabilidade e licença
 
-O programa permite definir uma URL de atualização e mantém uma cópia de segurança antes de substituir a versão atual. Use apenas uma origem que você controla e confia; confirme a integridade do arquivo antes de atualizar.
+Software fornecido **“como está”**, sem garantia. O funcionamento depende do Android, do Termux, de acesso root e da configuração de rede. Teste em ambiente controlado. Verifique as leis locais aplicáveis à revenda de acesso à internet, pagamentos e privacidade.
 
-## Limitações e responsabilidade
-
-Este software é fornecido **“como está”**, sem garantia. O funcionamento depende da versão do Android/Termux, do acesso root, da interface de rede e da configuração do hotspot. Teste em ambiente controlado antes de qualquer uso comercial.
-
-Verifique as leis e regras locais aplicáveis à revenda de acesso à internet, pagamentos, privacidade e tratamento de dados. O operador é responsável pela configuração segura e pelo cumprimento das obrigações aplicáveis.
-
-## Contribuições
-
-Relatos de bugs e melhorias são bem-vindos. Ao abrir uma issue, não inclua tokens, senhas, endereços IP públicos, dados de clientes nem outros dados pessoais.
-
-## Licença e créditos
-
-Distribuído sob a licença MIT; consulte [`LICENSE`](LICENSE). O README do pacote original atribui a ideia e o desenvolvimento a **khallendev**.
+Distribuído sob licença MIT; consulte [`LICENSE`](LICENSE). O pacote original atribui a ideia e o desenvolvimento a **khallendev**.

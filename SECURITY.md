@@ -2,6 +2,8 @@
 
 ## Uso seguro
 
+- O acesso inicial de cinco minutos é limitado por endereço MAC, que pode ser alterado ou aleatorizado pelo cliente; não o use como proteção antifraude.
+- Mantenha o checkout Mercado Pago desligado até que o administrador configure e teste o token e as confirmações no painel.
 - Altere a senha administrativa padrão (`admin123`) antes de habilitar o acesso de clientes.
 - Não exponha o painel `/admin` à internet pública.
 - Mantenha o Android, Termux e os pacotes atualizados.
